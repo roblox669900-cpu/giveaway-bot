@@ -190,6 +190,10 @@ async def reroll(ctx, giveaway_id: int):
     msg = await channel.fetch_message(data["message_id"])
     reaction = discord.utils.get(msg.reactions, emoji="🎉")
 
+    if not reaction:
+        await ctx.send("❌ No 🎉 reaction found on the giveaway message.")
+        return
+
     users = [u async for u in reaction.users() if not u.bot]
     if not users:
         await ctx.send("❌ No participants.")
