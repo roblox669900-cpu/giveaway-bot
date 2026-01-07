@@ -1,11 +1,27 @@
-import discord
-from discord.ext import commands
+import os
+import threading
 import asyncio
 import random
 from datetime import datetime
-import os
 
-# ================= BOT SETUP =================
+from flask import Flask
+import discord
+from discord.ext import commands
+
+# ================= FLASK (RENDER PORT FIX) =================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Giveaway bot is running"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_flask, daemon=True).start()
+
+# ================= DISCORD BOT SETUP =================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -35,55 +51,59 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
-
     message_count[message.author.id] = message_count.get(message.author.id, 0) + 1
     await bot.process_commands(message)
 
 @bot.event
 async def on_voice_state_update(member, before, after):
     now = datetime.utcnow()
-
     if after.channel and not before.channel:
         vc_join_time[member.id] = now
-
     if before.channel and not after.channel:
         if member.id in vc_join_time:
             delta = now - vc_join_time.pop(member.id)
             vc_minutes[member.id] = vc_minutes.get(member.id, 0) + delta.total_seconds() / 60
 
-# ================= HELP COMMAND =================
-@bot.command(name="help")
-async def help_command(ctx):
+# ================= HELP =================
+@bot.command()
+async def help(ctx):
     embed = discord.Embed(
         title="🎁 Giveaway Bot Help",
         description="""
 **Commands**
-`!giveaway <minutes> <winners> <msg_req> <vc_req> <prize>`
+`!giveaway <minutes> <winners> <msg_req> <vc_req> <prize> [image_url]`
 `!reroll <giveaway_id>`
 
 **Rules**
 • React 🎉 to enter  
-• Message OR VC requirement (OR logic)  
-• VC time counts even if user joined before  
-• Data resets every giveaway  
+• Message OR VC requirement  
+• VC counts even if joined before  
+• Requirements reset every giveaway  
 """,
         color=discord.Color.gold()
     )
     await ctx.send(embed=embed)
 
-# ================= GIVEAWAY COMMAND =================
+# ================= GIVEAWAY =================
 @bot.command()
-async def giveaway(ctx, minutes: int, winners: int, msg_req: int, vc_req: int, *, prize: str):
+async def giveaway(ctx, minutes: int, winners: int, msg_req: int, vc_req: int, *, prize_and_image: str):
     global giveaway_counter
 
+    # Reset old data
     message_count.clear()
     vc_minutes.clear()
     vc_join_time.clear()
 
+    # Track users already in VC
     now = datetime.utcnow()
     for vc in ctx.guild.voice_channels:
         for member in vc.members:
             vc_join_time.setdefault(member.id, now)
+
+    # Split prize & image
+    parts = prize_and_image.rsplit(" ", 1)
+    prize = parts[0]
+    image_url = parts[1] if len(parts) == 2 and parts[1].startswith("http") else None
 
     giveaway_id = giveaway_counter
     giveaway_counter += 1
@@ -105,6 +125,9 @@ React 🎉 to enter!
 """,
         color=discord.Color.gold()
     )
+
+    if image_url:
+        embed.set_image(url=image_url)
 
     msg = await ctx.send(embed=embed)
     await msg.add_reaction("🎉")
@@ -133,15 +156,11 @@ React 🎉 to enter!
         msgs = message_count.get(user.id, 0)
         vc = vc_minutes.get(user.id, 0)
 
-        passed = False
-        if msg_req > 0 and vc_req > 0:
-            passed = msgs >= msg_req or vc >= vc_req
-        elif msg_req > 0:
-            passed = msgs >= msg_req
-        elif vc_req > 0:
-            passed = vc >= vc_req
-        else:
-            passed = True
+        passed = (
+            (msg_req > 0 and msgs >= msg_req) or
+            (vc_req > 0 and vc >= vc_req) or
+            (msg_req == 0 and vc_req == 0)
+        )
 
         if passed:
             valid_users.append(user)
@@ -180,4 +199,8 @@ async def reroll(ctx, giveaway_id: int):
     await ctx.send(f"🔁 **Rerolled Winner:** {winner.mention}")
 
 # ================= RUN =================
-bot.run(os.environ["TOKEN"])
+TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise RuntimeError("TOKEN not set")
+
+bot.run(TOKEN)
