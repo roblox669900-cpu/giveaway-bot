@@ -8,7 +8,7 @@ from flask import Flask
 import discord
 from discord.ext import commands
 
-# ================= FLASK (RENDER PORT FIX) =================
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -21,18 +21,14 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# ================= DISCORD BOT SETUP =================
+# ================= DISCORD =================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.voice_states = True
 intents.reactions = True
 
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents,
-    help_command=None
-)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ================= DATA =================
 giveaway_counter = 1
@@ -42,7 +38,7 @@ message_count = {}
 vc_join_time = {}
 vc_minutes = {}
 
-# ================= TIME PARSER =================
+# ================= TIME =================
 def parse_time(arg):
     arg = arg.lower()
     if arg.endswith("m"):
@@ -51,8 +47,7 @@ def parse_time(arg):
         return int(arg[:-1]) * 60
     elif arg.endswith("d"):
         return int(arg[:-1]) * 1440
-    else:
-        return None
+    return None
 
 def format_time_left(seconds):
     mins = int(seconds // 60)
@@ -60,12 +55,9 @@ def format_time_left(seconds):
     hours = (mins % 1440) // 60
     minutes = mins % 60
     parts = []
-    if days > 0:
-        parts.append(f"{days}d")
-    if hours > 0:
-        parts.append(f"{hours}h")
-    if minutes > 0:
-        parts.append(f"{minutes}m")
+    if days > 0: parts.append(f"{days}d")
+    if hours > 0: parts.append(f"{hours}h")
+    if minutes > 0: parts.append(f"{minutes}m")
     return " ".join(parts) if parts else "0m"
 
 # ================= EVENTS =================
@@ -90,41 +82,16 @@ async def on_voice_state_update(member, before, after):
             delta = now - vc_join_time.pop(member.id)
             vc_minutes[member.id] = vc_minutes.get(member.id, 0) + delta.total_seconds() / 60
 
-# ================= HELP =================
-@bot.command()
-async def help(ctx):
-    embed = discord.Embed(
-        title="🎁 Giveaway Bot Help",
-        description="""
-**Command**
-`!giveaway <time> <winners> <msg_req> <vc_req_time> <prize> [image_url]`
-
-**Examples**
-!giveaway 10m 1 1 1m Yeti
-!giveaway 2h 2 5 30m Nitro
-!giveaway 1d 1 0 0 Robux
-
-**Other**
-!reroll <id>
-!setwinner <id> @user
-""",
-        color=discord.Color.gold()
-    )
-    await ctx.send(embed=embed)
-
 # ================= GIVEAWAY =================
 @bot.command()
 async def giveaway(ctx, duration: str, winners: int, msg_req: int, vc_req_time: str, *, prize_and_image: str):
     global giveaway_counter
 
     minutes = parse_time(duration)
-    if minutes is None:
-        await ctx.send("❌ Invalid duration format. Use m/h/d.")
-        return
-
     vc_req = parse_time(vc_req_time)
-    if vc_req is None:
-        await ctx.send("❌ Invalid VC time format. Use m/h/d.")
+
+    if minutes is None or vc_req is None:
+        await ctx.send("❌ Use m/h/d format.")
         return
 
     message_count.clear()
@@ -134,7 +101,7 @@ async def giveaway(ctx, duration: str, winners: int, msg_req: int, vc_req_time: 
     now = datetime.utcnow()
     for vc in ctx.guild.voice_channels:
         for member in vc.members:
-            vc_join_time.setdefault(member.id, now)
+            vc_join_time[member.id] = now
 
     parts = prize_and_image.rsplit(" ", 1)
     prize = parts[0]
@@ -207,12 +174,16 @@ React 🎉 to enter!
     bot.loop.create_task(countdown_task())
     await asyncio.sleep(minutes * 60)
 
+    # 🔥 FIX: COUNT VC TIME FOR USERS STILL IN VC
+    now = datetime.utcnow()
+    for uid, join_time in list(vc_join_time.items()):
+        delta = now - join_time
+        vc_minutes[uid] = vc_minutes.get(uid, 0) + delta.total_seconds() / 60
+
+    vc_join_time.clear()
+
     msg = await ctx.channel.fetch_message(msg.id)
     reaction = discord.utils.get(msg.reactions, emoji="🎉")
-
-    if not reaction:
-        await ctx.send("❌ Giveaway cancelled.")
-        return
 
     users = [u async for u in reaction.users() if not u.bot]
     valid_users = []
@@ -220,11 +191,13 @@ React 🎉 to enter!
     for user in users:
         msgs = message_count.get(user.id, 0)
         vc = vc_minutes.get(user.id, 0)
+
         passed = (
             (msg_req > 0 and msgs >= msg_req) or
             (vc_req > 0 and vc >= vc_req) or
             (msg_req == 0 and vc_req == 0)
         )
+
         if passed:
             valid_users.append(user)
 
@@ -267,10 +240,6 @@ async def reroll(ctx, giveaway_id: int):
     channel = bot.get_channel(data["channel_id"])
     msg = await channel.fetch_message(data["message_id"])
     reaction = discord.utils.get(msg.reactions, emoji="🎉")
-
-    if not reaction:
-        await ctx.send("❌ No 🎉 reaction found.")
-        return
 
     users = [u async for u in reaction.users() if not u.bot]
     if not users:
