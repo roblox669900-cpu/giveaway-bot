@@ -15,4 +15,4 @@ bot = commands.Bot(
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
 
-bot.run(os.getenv("TOKEN"))
+bot.run("TOKEN"))
