@@ -3,10 +3,11 @@ from discord.ext import commands
 import os
 
 intents = discord.Intents.default()
-intents.message_content = True  # required
+intents.message_content = True
+intents.voice_states = True  # VC tracking only
 
 bot = commands.Bot(
-    command_prefix="$",   # your prefix
+    command_prefix="$",
     intents=intents
 )
 
@@ -14,4 +15,4 @@ bot = commands.Bot(
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
 
-bot.run(os.getenv("TOKEN"))
+bot.run(os.getenv("DISCORD_TOKEN"))
