@@ -1,14 +1,16 @@
 import os
-import threading
-import asyncio
+import json
 import random
-from datetime import datetime, timedelta
-
+import asyncio
+import time
+from datetime import datetime
+from threading import Thread
 from flask import Flask
+
 import discord
 from discord.ext import commands
 
-# ================= FLASK =================
+# ================= FLASK (KEEP ALIVE) =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -19,225 +21,208 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_flask, daemon=True).start()
-
-# ================= DISCORD =================
+# ================= DISCORD SETUP =================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.voice_states = True
 intents.reactions = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
 
-# ================= DATA =================
-giveaway_counter = 1
-giveaways = {}
+DATA_GIVEAWAYS = "data/giveaways.json"
+DATA_USERS = "data/users.json"
 
-message_count = {}
-vc_join_time = {}
-vc_minutes = {}
+# ================= FILE HELPERS =================
+def load_json(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r") as f:
+        return json.load(f)
 
-# ================= TIME HELPERS =================
-def parse_time(arg: str):
-    arg = arg.lower()
-    if arg.endswith("m"):
-        return int(arg[:-1])
-    if arg.endswith("h"):
-        return int(arg[:-1]) * 60
-    if arg.endswith("d"):
-        return int(arg[:-1]) * 1440
-    return None
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=4)
 
-def format_time_left(seconds):
-    mins = int(seconds // 60)
-    d = mins // 1440
-    h = (mins % 1440) // 60
-    m = mins % 60
-    out = []
-    if d: out.append(f"{d}d")
-    if h: out.append(f"{h}h")
-    if m: out.append(f"{m}m")
-    return " ".join(out) if out else "0m"
-
-# ================= EVENTS =================
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
+# ================= USER TRACKING =================
+voice_join_time = {}
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    message_count[message.author.id] = message_count.get(message.author.id, 0) + 1
+
+    users = load_json(DATA_USERS)
+    uid = str(message.author.id)
+
+    if uid not in users:
+        users[uid] = {"messages": 0, "vc_minutes": 0}
+
+    users[uid]["messages"] += 1
+    save_json(DATA_USERS, users)
+
     await bot.process_commands(message)
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    now = datetime.utcnow()
+    users = load_json(DATA_USERS)
+    uid = str(member.id)
+
+    if uid not in users:
+        users[uid] = {"messages": 0, "vc_minutes": 0}
 
     if after.channel and not before.channel:
-        vc_join_time[member.id] = now
+        voice_join_time[uid] = time.time()
 
     if before.channel and not after.channel:
-        if member.id in vc_join_time:
-            delta = now - vc_join_time.pop(member.id)
-            vc_minutes[member.id] = vc_minutes.get(member.id, 0) + delta.total_seconds() / 60
+        if uid in voice_join_time:
+            minutes = int((time.time() - voice_join_time[uid]) / 60)
+            users[uid]["vc_minutes"] += minutes
+            voice_join_time.pop(uid, None)
+            save_json(DATA_USERS, users)
 
-# ================= GIVEAWAY =================
+# ================= GIVEAWAY COMMAND =================
 @bot.command()
-async def giveaway(ctx, duration: str, winners: int, msg_req: int, vc_req_time: str, *, prize_and_image: str):
-    global giveaway_counter
+async def giveaway(ctx, minutes: int, winners: int, msg_req: int, vc_req: int, image: str, *, prize: str):
+    """
+    $giveaway <minutes> <winners> <msg_req> <vc_req> <image|none> <prize>
+    """
 
-    minutes = parse_time(duration)
-    vc_req = parse_time(vc_req_time)
-
-    if minutes is None or vc_req is None:
-        await ctx.send("❌ Use time format like 10m / 2h / 1d")
-        return
-
-    # reset per-giveaway data
-    message_count.clear()
-    vc_minutes.clear()
-    vc_join_time.clear()
-
-    now = datetime.utcnow()
-
-    # register users already in VC
-    for vc in ctx.guild.voice_channels:
-        for member in vc.members:
-            vc_join_time[member.id] = now
-
-    parts = prize_and_image.rsplit(" ", 1)
-    prize = parts[0]
-    image_url = parts[1] if len(parts) == 2 and parts[1].startswith("http") else None
-
-    giveaway_id = giveaway_counter
-    giveaway_counter += 1
-
-    end_time = datetime.utcnow() + timedelta(minutes=minutes)
+    giveaways = load_json(DATA_GIVEAWAYS)
+    gid = str(int(max(giveaways.keys(), default="0")) + 1)
 
     embed = discord.Embed(
         title="🎉 GIVEAWAY 🎉",
-        description=f"""
-🆔 **Giveaway ID:** {giveaway_id}
-
-🏆 **Prize:** {prize}
-⏳ **Time Left:** {duration}
-👥 **Winners:** {winners}
-
-📋 **Requirements**
-💬 Messages: {msg_req}
-🎧 VC Minutes: {vc_req}min
-
-React 🎉 to enter!
-""",
+        description=(
+            f"🏆 **Prize:** {prize}\n"
+            f"👥 **Winners:** {winners}\n"
+            f"💬 **Messages Required:** {msg_req}\n"
+            f"🎧 **VC Minutes Required:** {vc_req}\n"
+            f"⏳ **Duration:** {minutes} minute(s)\n\n"
+            f"🆔 **Giveaway ID:** {gid}\n"
+            f"React 🎉 to enter!"
+        ),
         color=discord.Color.gold()
     )
 
-    if image_url:
-        embed.set_image(url=image_url)
+    if image.lower() != "none":
+        embed.set_image(url=image)
 
     msg = await ctx.send(embed=embed)
     await msg.add_reaction("🎉")
 
-    giveaways[giveaway_id] = {
-        "message_id": msg.id,
+    giveaways[gid] = {
         "channel_id": ctx.channel.id,
+        "message_id": msg.id,
+        "winners": winners,
         "msg_req": msg_req,
         "vc_req": vc_req,
-        "winners": winners,
-        "end_time": end_time,
-        "secret_winner": None,
-        "guild_id": ctx.guild.id
+        "end_time": time.time() + minutes * 60
     }
 
-    async def countdown():
-        while True:
-            left = (end_time - datetime.utcnow()).total_seconds()
-            if left <= 0:
-                break
-            embed.description = f"""
-🆔 **Giveaway ID:** {giveaway_id}
+    save_json(DATA_GIVEAWAYS, giveaways)
 
-🏆 **Prize:** {prize}
-⏳ **Time Left:** {format_time_left(left)}
-👥 **Winners:** {winners}
-
-📋 **Requirements**
-💬 Messages: {msg_req}
-🎧 VC Minutes: {vc_req}min
-
-React 🎉 to enter!
-"""
-            try:
-                await msg.edit(embed=embed)
-            except:
-                pass
-            await asyncio.sleep(60)
-
-    bot.loop.create_task(countdown())
     await asyncio.sleep(minutes * 60)
+    await end_giveaway(gid)
 
-    # ================= FINAL VC FIX =================
-    now = datetime.utcnow()
-    guild = ctx.guild
+# ================= END GIVEAWAY =================
+async def end_giveaway(gid):
+    giveaways = load_json(DATA_GIVEAWAYS)
+    users = load_json(DATA_USERS)
 
-    # force count users still in VC
-    for vc in guild.voice_channels:
-        for member in vc.members:
-            if member.id in vc_join_time:
-                delta = now - vc_join_time[member.id]
-                vc_minutes[member.id] = vc_minutes.get(member.id, 0) + delta.total_seconds() / 60
-                vc_join_time.pop(member.id, None)
+    if gid not in giveaways:
+        return
 
-    # ================= PICK WINNERS =================
-    msg = await ctx.channel.fetch_message(msg.id)
+    g = giveaways[gid]
+    channel = bot.get_channel(g["channel_id"])
+    msg = await channel.fetch_message(g["message_id"])
+
     reaction = discord.utils.get(msg.reactions, emoji="🎉")
+    if not reaction:
+        await channel.send("❌ Giveaway cancelled (no reactions).")
+        giveaways.pop(gid)
+        save_json(DATA_GIVEAWAYS, giveaways)
+        return
 
-    users = [u async for u in reaction.users() if not u.bot]
     valid_users = []
+    bot_top_role = channel.guild.me.top_role
 
-    for user in users:
-        msgs = message_count.get(user.id, 0)
-        vc = vc_minutes.get(user.id, 0)
+    async for user in reaction.users():
+        if user.bot:
+            continue
 
-        if (
-            (msg_req > 0 and msgs >= msg_req) or
-            (vc_req > 0 and vc >= vc_req) or
-            (msg_req == 0 and vc_req == 0)
-        ):
+        member = channel.guild.get_member(user.id)
+        if not member:
+            continue
+
+        # Staff cannot win
+        if member.top_role >= bot_top_role:
+            continue
+
+        stats = users.get(str(user.id), {"messages": 0, "vc_minutes": 0})
+        msgs = stats["messages"]
+        vc = stats["vc_minutes"]
+
+        passed = False
+        if g["msg_req"] == 0 and g["vc_req"] == 0:
+            passed = True
+        elif g["msg_req"] > 0 and g["vc_req"] > 0:
+            passed = msgs >= g["msg_req"] or vc >= g["vc_req"]
+        elif g["msg_req"] > 0:
+            passed = msgs >= g["msg_req"]
+        elif g["vc_req"] > 0:
+            passed = vc >= g["vc_req"]
+
+        if passed:
             valid_users.append(user)
 
     if not valid_users:
-        await ctx.send("❌ **No one met the giveaway requirements.**")
+        await channel.send("❌ No one met the giveaway requirements.")
+        giveaways.pop(gid)
+        save_json(DATA_GIVEAWAYS, giveaways)
         return
 
-    data = giveaways[giveaway_id]
-    if data["secret_winner"] and data["secret_winner"] in valid_users:
-        winners_list = [data["secret_winner"]]
-    else:
-        winners_list = random.sample(valid_users, min(winners, len(valid_users)))
+    winners = random.sample(valid_users, min(len(valid_users), g["winners"]))
+    mentions = ", ".join(w.mention for w in winners)
 
-    await ctx.send(
+    await channel.send(
         f"🎉 **GIVEAWAY ENDED!** 🎉\n"
-        f"🆔 Giveaway ID: {giveaway_id}\n"
-        f"🏆 Winner(s): {', '.join(u.mention for u in winners_list)}"
+        f"🆔 Giveaway ID: {gid}\n"
+        f"🏆 Winner(s): {mentions}"
     )
 
-# ================= SECRET WINNER =================
+    giveaways.pop(gid)
+    save_json(DATA_GIVEAWAYS, giveaways)
+
+# ================= REROLL =================
 @bot.command()
-@commands.has_permissions(administrator=True)
-async def setwinner(ctx, giveaway_id: int, user: discord.Member):
+async def reroll(ctx, giveaway_id: str):
+    giveaways = load_json(DATA_GIVEAWAYS)
     if giveaway_id not in giveaways:
-        await ctx.send("❌ Invalid giveaway ID.")
+        await ctx.send("❌ Invalid Giveaway ID or already ended.")
         return
-    giveaways[giveaway_id]["secret_winner"] = user
-    await ctx.send("✅ Secret winner set.")
 
-# ================= RUN =================
-TOKEN = os.getenv("TOKEN")
-if not TOKEN:
-    raise RuntimeError("TOKEN not set")
+    g = giveaways[giveaway_id]
+    channel = bot.get_channel(g["channel_id"])
+    msg = await channel.fetch_message(g["message_id"])
 
-bot.run(TOKEN)
+    reaction = discord.utils.get(msg.reactions, emoji="🎉")
+    if not reaction:
+        await ctx.send("❌ No reactions found.")
+        return
+
+    users = [u async for u in reaction.users() if not u.bot]
+    if not users:
+        await ctx.send("❌ No valid users.")
+        return
+
+    winner = random.choice(users)
+    await ctx.send(f"🔁 **Rerolled Winner:** {winner.mention}")
+
+# ================= START BOT =================
+if __name__ == "__main__":
+    Thread(target=run_flask, daemon=True).start()
+    TOKEN = os.getenv("TOKEN")
+    if not TOKEN:
+        raise RuntimeError("TOKEN not set")
+    bot.run(TOKEN)
