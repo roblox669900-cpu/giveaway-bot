@@ -1,2 +1,2 @@
-py-cord==2.4.1
+discord.py==2.4.0
 Flask==2.3.3
